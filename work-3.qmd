@@ -1,0 +1,533 @@
+---
+title: "Laboratorio GWAS: gallinas indígenas de Etiopía (rMVP)"
+author: "Juan Alvarez"
+format:
+  html:
+    toc: true
+    toc-location: left
+    number-sections: true
+    self-contained: true
+editor_options: 
+  chunk_output_type: console
+execute:
+  echo: false
+  warning: false
+---
+
+# Project Setup
+
+```{r}
+#| label:  setup
+
+cran <- c("devtools", "tidyverse", "openxlsx", "rMVP", "CMplot")
+git <- c("hemstrow/snpR") 
+
+suppressPackageStartupMessages({
+  for (pkg in cran) { 
+    if( !require(pkg, character.only = TRUE) ) {
+      install.packages(pkg)
+      library(pkg, character.only = TRUE)
+    } 
+  }
+  
+  for (pkg in git) {
+    if( !require(sub(".*/", "", pkg), character.only = TRUE) ) {
+      devtools::install_github(pkg, upgrade = TRUE)
+      library(sub(".*/", "", pkg), character.only = TRUE)
+    }
+  }
+}); remove(cran, git, pkg)
+
+source("https://inkaverse.com/docs.r")
+
+cat("Project: ", getwd(), "\n")
+cat("cores: ", parallel::detectCores())
+cores <- parallel::detectCores()*0.8
+session_info()
+```
+
+# Desarrollo
+
+Esta práctica adapta `lab_gwas-rmvp.qmd` a `chickens_small.vcf.gz`. El VCF adjunto contiene **234 individuos y 434529 SNP bialélicos** en **49 contigs o secuencias cromosómicas** del ensamblaje **GRCg6a**. El artículo de Gheyas et al. (2022) describe un conjunto original mayor (~15 millones de SNP); el archivo de esta práctica es un subconjunto y no constituye una réplica completa del estudio original.
+
+# Referencia
+
+- Gheyas, A., Vallejo-Trujillo, A., Kebede, A., Dessie, T., Hanotte, O., & Smith, J. (2022). *Whole genome sequences of 234 indigenous African chickens from Ethiopia*. Scientific Data, 9, 53. https://doi.org/10.1038/s41597-022-01129-4
+
+- https://pmc.ncbi.nlm.nih.gov/articles/PMC8844291/ ("Online-only Table 1")
+- rMVP: https://github.com/xiaolei-lab/rMVP
+
+# Import data
+
+```{r}
+#| label: setup
+required <- c("bigmemory", "readr", "dplyr", "ggplot2", "rvest")
+missing_pkgs <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_pkgs)) {
+  stop("Instala los paquetes faltantes en la consola de R: install.packages(c(",
+       paste(sprintf('"%s"', missing_pkgs), collapse = ", "), "))")
+}
+library(bigmemory)
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+infile <- "chickens_small.vcf.gz"
+metadata_file <- "metadata_chickens.csv"
+filtered_vcf <- file.path("data", "chickens_autosomas_QC.vcf")
+prefix <- file.path("rmvp", "chickens")
+plotdir <- file.path("rmvp", "gwas")
+
+for (p in c("data", "rmvp", plotdir)) {
+  dir.create(p, recursive = TRUE, showWarnings = FALSE)
+  stopifnot(dir.exists(p))
+}
+if (!file.exists(infile)) stop("No se encuentra: ", infile, " | directorio de trabajo: ", getwd())
+
+```
+
+```{r}
+#| label: inspect-vcf
+get_vcf_sample_ids <- function(path) {
+  con <- gzfile(path, "rt")
+  on.exit(close(con))
+  repeat {
+    ln <- readLines(con, n = 1L, warn = FALSE)
+    if (!length(ln)) stop("VCF sin línea #CHROM")
+    if (startsWith(ln, "#CHROM")) {
+      fields <- strsplit(ln, "\t", fixed = TRUE)[[1]]
+      return(fields[-seq_len(9)])
+    }
+  }
+}
+
+sample_ids <- get_vcf_sample_ids(infile)
+stopifnot(length(sample_ids) == 234L, !anyDuplicated(sample_ids))
+cat("Individuos del VCF: ", length(sample_ids), "\n")
+print(head(sample_ids, 12))
+```
+
+# Metadatos y fenotipos
+
+La **Online-only Table 1** informa el identificador de muestra, sexo, edad estimada (meses), peso corporal (kg), región y localidad.
+
+```{r}
+#| label: get-real-phenotypes
+extract_online_table <- function() {
+  urls <- c(
+    "https://pmc.ncbi.nlm.nih.gov/articles/PMC8844291/",
+    "https://europepmc.org/articles/PMC8844291"
+  )
+  norm <- function(x) gsub("[^a-z0-9]", "", tolower(x))
+
+  for (url in urls) {
+    tb_list <- tryCatch({
+      html <- rvest::read_html(url)
+      rvest::html_table(rvest::html_elements(html, "table"), fill = TRUE)
+    }, error = function(e) list())
+
+    for (tb in tb_list) {
+      names_norm <- norm(names(tb))
+      locate <- function(pattern) {
+        match_idx <- which(grepl(pattern, names_norm))
+        if (length(match_idx)) match_idx[1] else NA_integer_
+      }
+      col <- c(
+        id = locate("^sampleid$"),
+        weight = locate("bodyweightkg"),
+        sex = locate("^sex$"),
+        age = locate("estimatedagemonth"),
+        region = locate("geographicregion"),
+        village = locate("villageorkebele")
+      )
+      if (anyNA(col)) next
+      clean_number <- function(x) readr::parse_number(as.character(x), locale = readr::locale(decimal_mark = "."))
+      out <- data.frame(
+        Taxa = trimws(as.character(tb[[col["id"]]])),
+        body_weight_kg = clean_number(tb[[col["weight"]]]),
+        sex = toupper(trimws(as.character(tb[[col["sex"]]]))),
+        age_months = clean_number(tb[[col["age"]]]),
+        region = trimws(as.character(tb[[col["region"]]])),
+        village = trimws(as.character(tb[[col["village"]]])),
+        stringsAsFactors = FALSE
+      )
+      if (nrow(out) >= 200L) return(out)
+    }
+  }
+  stop("No fue posible acceder automáticamente a la Online-only Table 1. ",
+       "Descarga los metadatos reales desde https://pmc.ncbi.nlm.nih.gov/articles/PMC8844291/ ",
+       "y guárdalos en 'metadata_chickens.csv'. No uses valores simulados.")
+}
+
+if (!file.exists(metadata_file)) {
+  info <- extract_online_table()
+  readr::write_csv(info, metadata_file)
+} else {
+  info <- readr::read_csv(metadata_file, show_col_types = FALSE)
+}
+required_columns <- c("Taxa", "body_weight_kg", "sex", "age_months", "region", "village")
+stopifnot(all(required_columns %in% names(info)))
+if (anyNA(info$Taxa) || anyDuplicated(info$Taxa)) {
+  stop("Metadatos: hay IDs ausentes o duplicados.")
+}
+# Los identificadores del VCF son la referencia; no se modifican.
+# Normalizar SOLO espacios externos y diferencias de mayúsculas/minúsculas.
+# NO eliminar guiones o barras bajas: pueden distinguir muestras diferentes.
+normalizar_id <- function(x) tolower(trimws(as.character(x)))
+ids_meta_norm <- normalizar_id(info$Taxa)
+ids_vcf_norm <- normalizar_id(sample_ids)
+
+if (anyDuplicated(ids_meta_norm) || anyDuplicated(ids_vcf_norm)) {
+  stop("La normalización produjo IDs duplicados. Revisar manualmente.")
+}
+if (!setequal(ids_meta_norm, ids_vcf_norm)) {
+  faltan <- setdiff(sample_ids, info$Taxa)
+  sobran <- setdiff(info$Taxa, sample_ids)
+  message("IDs del VCF sin correspondencia exacta: ",
+          paste(head(faltan, 15), collapse = ", "))
+  message("IDs de los metadatos sin correspondencia exacta: ",
+          paste(head(sobran, 15), collapse = ", "))
+  stop("Persisten diferencias más allá de mayúsculas/espacios. ",
+       "Revisa el CSV fuente antes de realizar el GWAS.")
+}
+# Correspondencia 1:1 por ID normalizado; conservar explícitamente la traza.
+pos <- match(ids_vcf_norm, ids_meta_norm)
+stopifnot(!anyNA(pos), length(unique(pos)) == length(sample_ids))
+info <- info[pos, , drop = FALSE]
+ids_antes <- as.character(info$Taxa)
+if (any(ids_antes != sample_ids)) {
+  correcciones <- data.frame(Taxa_metadata = ids_antes[ids_antes != sample_ids],
+                            Taxa_VCF = sample_ids[ids_antes != sample_ids])
+  message("Ajustes de escritura verificados (sin cambiar orden de individuos):")
+  print(correcciones)
+}
+info$Taxa <- sample_ids
+stopifnot(identical(info$Taxa, sample_ids))
+
+info$body_weight_kg <- as.numeric(info$body_weight_kg)
+info$age_months <- as.numeric(info$age_months)
+info$sex <- toupper(trimws(as.character(info$sex)))
+info$sex[!info$sex %in% c("M", "F")] <- NA_character_
+
+n_valid <- sum(stats::complete.cases(info[, c("body_weight_kg", "age_months", "sex")]))
+cat("Muestras con peso, edad y sexo disponibles:", n_valid, "/", nrow(info), "\n")
+if (n_valid < 180L) stop("Fenotipos/covariables reales insuficientes. Revisa el CSV fuente.")
+print(summary(info[, c("body_weight_kg", "age_months")]))
+print(table(info$sex, useNA = "ifany"))
+print(table(info$region, useNA = "ifany"))
+```
+
+## Distribución fenotípica
+
+```{r}
+#| label: phenotype-distribution
+p_weight <- ggplot(info, aes(x = body_weight_kg, fill = sex)) +
+  geom_histogram(position = "identity", bins = 20, alpha = 0.65, na.rm = TRUE) +
+  labs(x = "Peso corporal (kg)", y = "Número de gallinas", fill = "Sexo",
+       title = "Distribución observada de peso corporal") +
+  theme_bw()
+print(p_weight)
+ggsave(file.path(plotdir, "peso_corporal_distribucion.png"), p_weight,
+       width = 8, height = 5, dpi = 300)
+```
+
+# Preparar SNP autosómicos para rMVP
+
+En el VCF, los cromosomas se identifican con códigos GenBank (`CM000093.5`, etc.). Para los diagramas Manhattan y las pruebas de asociación, los recodificamos a 1–28 y 30–33 siguiendo **la Tabla 2 de Gheyas et al. (2022)**. Excluimos Z/W y contigs no asignados porque requieren tratamientos específicos de ploidía y/o producen posiciones cromosómicas ambiguas.
+
+El filtrado retiene SNP con **tasa de genotipado ≥ 0.95** y **MAF ≥ 0.05**, sólo en autosomas. Para conservar trazabilidad, cada identificador nuevo es `chr_pos_REF_ALT`. Las llamadas ausentes se mantienen como `./.`; rMVP las imputará por el genotipo mayoritario en esta práctica (estrategia básica, no equivalente a imputación por haplotipos). El filtrado no sustituye pruebas de sensibilidad, LD pruning para PCA ni auditoría de efectos de lote.
+
+```{r}
+#| label: preprocessing-vcf
+lookup <- c(
+  stats::setNames(as.integer(1:24), sprintf("CM%06d.5", 93:116)),
+  "CM000124.5" = 25L,
+  "CM000117.5" = 26L,
+  "CM000118.5" = 27L,
+  "CM000119.5" = 28L,
+  "CM003637.2" = 30L,
+  "CM003638.2" = 31L,
+  "CM000120.4" = 32L,
+  "CM000123.5" = 33L
+)
+
+prepare_vcf <- function(in_path, out_path, lookup, min_call = 0.95, min_maf = 0.05) {
+  con <- gzfile(in_path, "rt")
+  fout <- file(out_path, "wt")
+  on.exit({close(con); close(fout)}, add = TRUE)
+  writeLines(c(
+    "##fileformat=VCFv4.2",
+    "##reference=GCA_000002315.5_GRCg6a_genomic.fna",
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">'
+  ), fout)
+
+  qc <- c(total = 0L, autosomes = 0L, pass = 0L, low_call = 0L, low_maf = 0L)
+  n_samples <- length(sample_ids)
+  has_header <- FALSE
+  repeat {
+    lines <- readLines(con, n = 300L, warn = FALSE)
+    if (!length(lines)) break
+    headers <- lines[startsWith(lines, "#CHROM")]
+    if (length(headers)) {
+      writeLines(headers, fout)
+      has_header <- TRUE
+    }
+    data_lines <- lines[!startsWith(lines, "#")]
+    if (!length(data_lines)) next
+    fields_list <- strsplit(data_lines, "\t", fixed = TRUE)
+    out_lines <- character(0)
+    for (z in fields_list) {
+      qc["total"] <- qc["total"] + 1L
+      if (length(z) != n_samples + 9L) stop("VCF: número de columnas incorrecto")
+      chr <- unname(lookup[z[1]])
+      if (is.na(chr)) next
+      qc["autosomes"] <- qc["autosomes"] + 1L
+      if (z[7] != "PASS") next
+      if (z[9] != "GT") stop("Se esperaba formato GT; revisa la variante en ", z[1], ":", z[2])
+      gt <- gsub("|", "/", z[-(1:9)], fixed = TRUE)
+      n0 <- sum(gt == "0/0")
+      n1 <- sum(gt == "0/1" | gt == "1/0")
+      n2 <- sum(gt == "1/1")
+      called <- n0 + n1 + n2
+      if (called / n_samples < min_call) {
+        qc["low_call"] <- qc["low_call"] + 1L
+        next
+      }
+      af <- (n1 + 2 * n2) / (2 * called)
+      maf <- min(af, 1 - af)
+      if (maf < min_maf) {
+        qc["low_maf"] <- qc["low_maf"] + 1L
+        next
+      }
+      if (any(!gt %in% c("0/0", "0/1", "1/0", "1/1", "./."))) {
+        stop("Genotipo no diploide/inesperado en ", z[1], ":", z[2])
+      }
+      gt[gt == "1/0"] <- "0/1"
+      z2 <- c(as.character(chr), z[2],
+              paste(chr, z[2], z[4], z[5], sep = "_"),
+              z[4], z[5], ".", "PASS", ".", "GT", gt)
+      out_lines <- c(out_lines, paste(z2, collapse = "\t"))
+      qc["pass"] <- qc["pass"] + 1L
+    }
+    if (length(out_lines)) writeLines(out_lines, fout)
+  }
+  if (!has_header) stop("VCF original sin encabezado #CHROM")
+  qc
+}
+
+qc_file <- file.path("data", "resumen_QC.csv")
+if (!file.exists(filtered_vcf) || !file.exists(qc_file)) {
+  qc <- prepare_vcf(infile, filtered_vcf, lookup)
+  readr::write_csv(data.frame(metric = names(qc), total = as.integer(qc)), qc_file)
+} else {
+  qc <- readr::read_csv(qc_file, show_col_types = FALSE)
+  message("Se reutiliza el VCF preprocesado; si cambias el filtrado, elimina VCF y QC y vuelve a ejecutar.")
+}
+print(qc)
+stopifnot(file.exists(filtered_vcf))
+```
+
+# rMVP: importación de datos
+
+```{r}
+#| label: prepare-rmvp
+pheno <- info[, c("Taxa", "body_weight_kg")]
+readr::write_csv(pheno, file.path("data", "chickens_fenotipo.csv"))
+
+if (!file.exists(paste0(prefix, ".geno.desc"))) {
+  rMVP::MVP.Data(
+    fileVCF = filtered_vcf,
+    filePhe = file.path("data", "chickens_fenotipo.csv"),
+    sep.phe = ",",
+    SNP.impute = "Major",  # Práctica: imputación modal simple
+    fileKin = FALSE,
+    filePC = FALSE,
+    ncpus = cores,
+    out = prefix
+  )
+} else {
+  message("Matriz rMVP existente. Para reprocesar, cierra bigmemory y usa otra carpeta/prefijo.")
+}
+
+stopifnot(file.exists(paste0(prefix, ".geno.desc")))
+```
+
+## Matriz de parentesco (kinship)
+
+```{r}
+#| label: kinship
+if (!file.exists(paste0(prefix, ".kin.desc"))) {
+  rMVP::MVP.Data.Kin(
+    fileKin = TRUE,
+    mvp_prefix = prefix,
+    out = prefix,
+    cpu = cores
+  )
+}
+stopifnot(file.exists(paste0(prefix, ".kin.desc")))
+```
+
+## PCA
+
+
+
+```{r}
+#| label: pca
+if (!file.exists(paste0(prefix, ".pc.desc"))) {
+  rMVP::MVP.Data.PC(
+    filePC = TRUE,
+    mvp_prefix = prefix,
+    out = prefix,
+    pcs.keep = 3,
+    cpu = cores
+  )
+}
+pcs <- as.matrix(bigmemory::attach.big.matrix(paste0(prefix, ".pc.desc")))
+stopifnot(nrow(pcs) == length(sample_ids), ncol(pcs) >= 3L)
+
+pc_plot_data <- data.frame(
+  Taxa = sample_ids,
+  PC1 = pcs[, 1], PC2 = pcs[, 2], PC3 = pcs[, 3],
+  region = info$region,
+  sex = info$sex
+)
+p_pca <- ggplot(pc_plot_data, aes(PC1, PC2, color = region)) +
+  geom_point(size = 2, alpha = 0.8) +
+  labs(title = "PCA genómico de 234 gallinas", color = "Región") +
+  theme_bw()
+print(p_pca)
+ggsave(file.path(plotdir, "PCA_chickens.png"), p_pca, width = 8, height = 6, dpi = 300)
+```
+
+## Objetos de entrada y alineación
+Las covariables de rMVP **no se reordenan automáticamente** y deben estar en el orden del genotipo.
+
+```{r}
+#| label: inputs-and-covariates
+phenotype <- read.table(paste0(prefix, ".phe"), header = TRUE,
+                        stringsAsFactors = FALSE, check.names = FALSE)
+genotype <- bigmemory::attach.big.matrix(paste0(prefix, ".geno.desc"))
+mapping <- read.table(paste0(prefix, ".geno.map"), header = TRUE,
+                      stringsAsFactors = FALSE)
+kinship <- bigmemory::attach.big.matrix(paste0(prefix, ".kin.desc"))
+ind_ids <- scan(paste0(prefix, ".geno.ind"), what = character(), quiet = TRUE)
+
+stopifnot(length(ind_ids) == nrow(phenotype), nrow(genotype) == length(ind_ids))
+stopifnot(ncol(genotype) == nrow(mapping))
+stopifnot(!anyDuplicated(ind_ids))
+if (!identical(as.character(phenotype[[1]]), ind_ids)) {
+  stop("El orden del fenotipo preparado no coincide con el orden del genotipo.")
+}
+
+info_ordered <- info[match(ind_ids, info$Taxa), , drop = FALSE]
+stopifnot(identical(as.character(info_ordered$Taxa), ind_ids))
+
+# Verificar coherencia del orden del PCA antes de introducir PCs como covariables.
+if (!identical(ind_ids, sample_ids)) {
+  stop("El orden de IDs cambió durante la conversión. Validar y reordenar PCs por ID.")
+}
+
+# Codificación 0 = hembra, 1 = macho; NA no se inventa.
+sex_male <- ifelse(is.na(info_ordered$sex), NA_real_,
+                   ifelse(info_ordered$sex == "M", 1, 0))
+cv <- cbind(
+  sex_male = sex_male,
+  age_months = info_ordered$age_months,
+  PC1 = pcs[, 1], PC2 = pcs[, 2], PC3 = pcs[, 3]
+)
+stopifnot(nrow(cv) == nrow(phenotype), ncol(cv) == 5L)
+cat("Individuos:", nrow(genotype), " SNP:", ncol(genotype), "\n")
+cat("Datos completos fenotipo/covariables: ",
+    sum(complete.cases(cbind(phenotype[[2]], cv))), "\n")
+```
+
+# GWAS de peso corporal (GLM, MLM y FarmCPU)
+
+Se incluyen sexo, edad y tres componentes principales como covariables; MLM utiliza la matriz de parentesco.
+
+```{r}
+#| label: run-gwas
+trait <- phenotype[, 1:2, drop = FALSE]
+colnames(trait) <- c("Taxa", "body_weight_kg")
+stopifnot(nrow(trait) == length(ind_ids))
+
+imMVP <- rMVP::MVP(
+  phe = trait,
+  geno = genotype,
+  map = mapping,
+  K = kinship,
+  CV.GLM = cv,
+  CV.MLM = cv,
+  CV.FarmCPU = cv,
+  method = c("GLM", "MLM", "FarmCPU"),
+  ncpus = cores,
+  maxLoop = 10,
+  outpath = plotdir,
+  file.output = TRUE,
+  file.type = "jpg",
+  dpi = 300,
+  threshold = 0.05 / nrow(mapping)
+)
+gc()
+```
+
+# Gráficos del laboratorio
+
+El umbral de Bonferroni se calcula en función del número de SNP analizados, en lugar de emplear un umbral arbitrario de la práctica de arroz. Una prueba más exhaustiva debería considerar la dependencia entre marcadores y explorar FDR, además de revisar la inflación genómica mediante QQ plots.
+
+## Densidad de SNP
+
+```{r}
+#| label: snp-density
+rMVP::MVP.Report(
+  MVP = imMVP,
+  plot.type = "d",
+  col = c("darkgreen", "yellow", "red"),
+  file.type = "jpg", dpi = 300,
+  outpath = plotdir
+)
+```
+
+## Histograma del fenotipo
+
+```{r}
+#| label: mvp-hist
+rMVP::MVP.Hist(
+  phe = trait,
+  outpath = plotdir,
+  file.type = "jpg", breakNum = 18, dpi = 300
+)
+```
+
+## Manhattan
+
+```{r}
+#| label: manhattan
+threshold_bonf <- 0.05 / nrow(mapping)
+cat("Bonferroni alpha=0.05:", signif(threshold_bonf, 4), "\n")
+rMVP::MVP.Report(
+  MVP = imMVP,
+  plot.type = "m",
+  multracks = TRUE,
+  threshold = threshold_bonf,
+  threshold.col = "black",
+  threshold.lty = 2,
+  threshold.lwd = 1,
+  amplify = TRUE,
+  file.type = "jpg", dpi = 300,
+  outpath = plotdir
+)
+```
+
+## QQ plot
+
+```{r}
+#| label: qqplot
+rMVP::MVP.Report(
+  MVP = imMVP,
+  plot.type = "q",
+  multracks = TRUE,
+  file.type = "jpg", dpi = 300,
+  outpath = plotdir
+)
+```

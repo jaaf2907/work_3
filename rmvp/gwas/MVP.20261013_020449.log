@@ -1,0 +1,78 @@
+======================== Welcome to MVP =========================
+    an R package for Memory-efficient, Visualization-enhanced    
+     and Parallel-accelerated genome-wide association study      
+                      __  __  __   __  ___                       
+                     |  \/  | \ \ / / | _ \                      
+                     | |\/| |  \ V /  |  _/                      
+                     |_|  |_|   \_/   |_|        Version: 1.4.6  
+  Design & Maintain: Lilin Yin, Haohao Zhang, and Xiaolei Liu    
+  Contributors: Zhenshuang Tang, Jingya Xu, Dong Yin, Zhiwu      
+  Zhang, Xiaohui Yuan, Mengjin Zhu, Shuhong Zhao, Xinyun Li      
+  Mailto: xiaoleiliu@mail.hzau.edu.cn, ylilin@mail.hzau.edu.cn   
+=================================================================
+Start: 2026-10-13 02:04:49 -05 
+The log has been output to the file: rmvp/gwas/MVP.20261013_020449.log 
+Input data has 234 individuals and 412455 markers 
+Markers are detected to be stored by column 
+Analyzed trait: body_weight_kg 
+Number of threads used: 12.8 
+No high performance math library detected! The computational efficiency would be greatly reduced
+Total 41 individuals are removed due to missings 
+Calculate allele frequency... 
+Eigen Decomposition on GRM 
+Number of provided covariates of GLM: 5 
+Number of provided covariates of MLM: 5 
+Number of provided covariates of FarmCPU: 5 
+-------------------------GWAS Start------------------------- 
+General Linear Model (GLM) Start... 
+scanning...
+Genomic inflation factor (lambda): 0.9619 
+Writing results to local file 
+Mixed Linear Model (MLM) Start... 
+Variance components using: BRENT 
+Estimated Vg and Ve: 0.000004 0.073025 
+scanning...
+Genomic inflation factor (lambda): 0.9648 
+Writing results to local file 
+FarmCPU Start... 
+Current loop: 1 out of maximum of 10 
+seqQTN: 
+NULL 
+number of covariates in current loop is: 
+5 
+scanning... 
+Current loop: 2 out of maximum of 10 
+Optimizing Pseudo QTNs... 
+Top snps have little effect, set seqQTN to NULL! 
+Genomic inflation factor (lambda): 0.9619 
+Writing results to local file 
+Significant level: 2.94e-13 
+---------------------Visualization Start-------------------- 
+Phenotype distribution Plotting 
+SNP_Density Plotting 
+Circular_Manhattan Plotting body_weight_kg.GLM 
+Circular_Manhattan Plotting body_weight_kg.MLM 
+Circular_Manhattan Plotting body_weight_kg.FarmCPU 
+Rectangular_Manhattan Plotting body_weight_kg.GLM 
+Rectangular_Manhattan Plotting body_weight_kg.MLM 
+Rectangular_Manhattan Plotting body_weight_kg.FarmCPU 
+Q_Q Plotting body_weight_kg.GLM 
+Q_Q Plotting body_weight_kg.MLM 
+Q_Q Plotting body_weight_kg.FarmCPU 
+Multracks_Rectangular Plotting body_weight_kg.GLM 
+Multracks_Rectangular Plotting body_weight_kg.MLM 
+Multracks_Rectangular Plotting body_weight_kg.FarmCPU 
+Multracks_QQ Plotting body_weight_kg.GLM 
+Multracks_QQ Plotting body_weight_kg.MLM 
+Multracks_QQ Plotting body_weight_kg.FarmCPU 
+Multraits_QQ Plotting body_weight_kg.GLM 
+Multraits_QQ Plotting body_weight_kg.MLM 
+Multraits_QQ Plotting body_weight_kg.FarmCPU 
+Results are stored at Working Directory: rmvp/gwas 
+End: 2026-10-13 02:08:12 -05 
+Total running time: 3m23s 
+===================== MVP ACCOMPLISHED ===================== 
+SNP_Density Plotting 
+Multracks_Rectangular Plotting body_weight_kg.GLM 
+Multracks_Rectangular Plotting body_weight_kg.MLM 
+Multracks_Rectangular Plotting body_weight_kg.FarmCPU 
